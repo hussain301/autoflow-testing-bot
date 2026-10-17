@@ -1528,23 +1528,25 @@ class ActionRecorderBot:
             self.is_paused = True
             self.pause_start_perf = time.perf_counter()
 
-            if from_gui_button and self.events:
+            if self.events:
                 now_perf = self.pause_start_perf
                 stop_elapsed = self.events[-1]["time"]
-                if self.bot_deiconified_time > 0 and (now_perf - self.bot_deiconified_time) < 2.2:
-                    cutoff_window = (now_perf - self.bot_deiconified_time) + 0.35
+                if self.bot_deiconified_time > 0 and (now_perf - self.bot_deiconified_time) < 15.0:
+                    cutoff_window = (now_perf - self.bot_deiconified_time) + 0.55
+                elif from_gui_button:
+                    cutoff_window = 0.65
                 else:
-                    cutoff_window = 0.45
+                    cutoff_window = 0.0
 
                 removed = 0
-                while self.events and (stop_elapsed - self.events[-1]["time"]) <= cutoff_window:
+                while self.events and cutoff_window > 0 and (stop_elapsed - self.events[-1]["time"]) <= cutoff_window:
                     if self.events[-1]["type"] in ("mouse_click", "mouse_move"):
                         self.events.pop()
                         removed += 1
                     else:
                         break
                 if removed > 0:
-                    self.log(f"✓ Trimmed 'Pause Recording' button click ({removed} trailing event(s)).")
+                    self.log(f"✓ Trimmed 'Pause Recording' taskbar/button click ({removed} trailing event(s)).")
 
             self.pause_rec_btn.configure(
                 text="▶ Resume Rec (F6)",
@@ -1555,13 +1557,14 @@ class ActionRecorderBot:
             self._set_status(f"❚❚ PAUSED ({sw}×{sh})", "#FBBF24", "#451A03")
             self.log("❚❚ Recording PAUSED! Timer frozen & actions ignored until you press [F6] or Resume.")
         else:
-            if from_gui_button and self.auto_min_var.get():
+            if self.auto_min_var.get() and self.root.state() != "iconic":
                 self.root.iconify()
                 time.sleep(0.15)
 
             paused_duration = time.perf_counter() - self.pause_start_perf
             self.start_time += paused_duration
             self.is_paused = False
+            self.bot_deiconified_time = 0.0
 
             self.pause_rec_btn.configure(
                 text="❚❚ Pause Rec (F6)",
@@ -1589,6 +1592,7 @@ class ActionRecorderBot:
         self.is_recording = True
         self.is_paused = False
         self.pause_start_perf = 0.0
+        self.bot_deiconified_time = 0.0
         self.start_time = time.perf_counter()
         self.last_move_time = 0.0
 
@@ -1644,26 +1648,28 @@ class ActionRecorderBot:
             self.kb_listener.stop()
             self.kb_listener = None
 
-        if self.root.state() == "iconic":
-            self.root.deiconify()
-
-        if from_gui_button and self.events:
-            now_perf = time.perf_counter()
+        now_perf = time.perf_counter()
+        if self.events:
             stop_elapsed = self.events[-1]["time"]
-            if self.bot_deiconified_time > 0 and (now_perf - self.bot_deiconified_time) < 2.2:
-                cutoff_window = (now_perf - self.bot_deiconified_time) + 0.35
+            if self.bot_deiconified_time > 0 and (now_perf - self.bot_deiconified_time) < 15.0:
+                cutoff_window = (now_perf - self.bot_deiconified_time) + 0.55
+            elif from_gui_button:
+                cutoff_window = 0.65
             else:
-                cutoff_window = 0.45
+                cutoff_window = 0.0
 
             removed = 0
-            while self.events and (stop_elapsed - self.events[-1]["time"]) <= cutoff_window:
+            while self.events and cutoff_window > 0 and (stop_elapsed - self.events[-1]["time"]) <= cutoff_window:
                 if self.events[-1]["type"] in ("mouse_click", "mouse_move"):
                     self.events.pop()
                     removed += 1
                 else:
                     break
             if removed > 0:
-                self.log(f"✓ Trimmed final 'Stop Recording' click ({removed} trailing event(s)).")
+                self.log(f"✓ Trimmed final 'Stop Recording' taskbar/button click ({removed} trailing event(s)).")
+
+        if self.root.state() == "iconic":
+            self.root.deiconify()
 
         self.screen = get_full_screen_bounds()
         sw, sh = self.screen["width"], self.screen["height"]
@@ -1988,16 +1994,22 @@ class ActionRecorderBot:
                             anc_txt = event.get("anchor_text", "")
                             if self.smart_target_var.get() and self._is_dynamic_list_anchor(anc_txt):
                                 pause_t = time.perf_counter()
-                                found = smart_locate_target_on_screen(
-                                    self.screen,
-                                    tx,
-                                    ty,
-                                    anchor_text=anc_txt,
-                                    template_b64="",
-                                    current_test_email=self.current_test_email,
-                                    domain_hint=self.domain_var.get(),
-                                    vertical_list_mode=True,
-                                )
+                                found = None
+                                wait_anchor_start = time.perf_counter()
+                                while time.perf_counter() - wait_anchor_start < 2.5 and not self.stop_playback_flag:
+                                    found = smart_locate_target_on_screen(
+                                        self.screen,
+                                        tx,
+                                        ty,
+                                        anchor_text=anc_txt,
+                                        template_b64="",
+                                        current_test_email=self.current_test_email,
+                                        domain_hint=self.domain_var.get(),
+                                        vertical_list_mode=True,
+                                    )
+                                    if found:
+                                        break
+                                    time.sleep(0.28)
                                 loop_start_clock += (time.perf_counter() - pause_t)
                                 if found:
                                     fx, fy, reason = found

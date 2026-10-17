@@ -6,7 +6,7 @@ import random
 import re
 import string
 import time
-from typing import List, Optional
+from typing import Optional
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -24,6 +24,16 @@ FIRST_NAMES = [
     "jamie", "avery", "quinn", "blake", "hayden", "dakota", "reese",
     "chloe", "lucas", "mason", "ethan", "logan", "jacob", "mia", "zoe",
 ]
+
+# Non-OTP notification email subjects that must always be ignored
+IGNORED_SUBJECT_PATTERNS = (
+    "did you just add",
+    "did you just remove",
+    "security alert",
+    "new login to",
+    "email address was added",
+    "email address was removed",
+)
 
 
 def generate_random_domain_email(domain: str = "nariwal.shop", prefix: str = "") -> str:
@@ -189,12 +199,15 @@ class GmailOTPFetcher:
     def extract_otp_from_text(text: str, custom_regex: str = "") -> Optional[str]:
         """
         Extract OTP verification code from email subject/snippet/body.
-        Supports numeric 4-8 digit codes, alphanumeric 6-char codes, or custom regex.
+        Strictly avoids postal ZIP codes (like 'CA 94025' in Meta footers).
         """
         if not text:
             return None
 
         clean = re.sub(r"\s+", " ", text)
+        # Strip known postal address footers (e.g., "Menlo Park, CA 94025")
+        clean = re.sub(r"Menlo\s+Park,?\s+CA\s+94025", " ", clean, flags=re.IGNORECASE)
+        clean = re.sub(r"\bCA\s+94025\b", " ", clean, flags=re.IGNORECASE)
 
         if custom_regex.strip():
             try:
@@ -204,31 +217,26 @@ class GmailOTPFetcher:
             except Exception:
                 pass
 
-        # 1. Contextual 4-8 digit numeric code near keywords (code, otp, verification, verify, login, pin)
-        kw_num = r"(?:code|otp|verification|verify|login|pin|passcode)[^0-9]{1,40}\b(\d{4,8})\b"
-        m = re.search(kw_num, clean, flags=re.IGNORECASE)
-        if m:
-            return m.group(1)
-
-        # 2. Standalone 6-digit numeric code (most common for Meta, Google & website signups)
-        six_digits = re.findall(r"\b(\d{6})\b", clean)
+        # 1. Standalone 6-digit numeric code (Standard for Meta, Google & website signups)
+        six_digits = [c for c in re.findall(r"\b(\d{6})\b", clean) if c != "000000"]
         if six_digits:
             return six_digits[0]
 
+        # 2. Contextual 4-8 digit numeric code right after OTP keywords
+        kw_num = r"(?:confirmation\s+code|verification\s+code|security\s+code|login\s+code|otp|passcode|code\s+is)[^0-9]{1,35}\b(\d{4,8})\b"
+        m = re.search(kw_num, clean, flags=re.IGNORECASE)
+        if m:
+            cand = m.group(1)
+            if cand != "94025":
+                return cand
+
         # 3. Contextual 6-character alphanumeric uppercase/digit code
-        kw_alnum = r"(?:code|otp|verification|verify)[^A-Za-z0-9]{1,30}\b([A-Z0-9]{6})\b"
+        kw_alnum = r"(?:confirmation\s+code|verification\s+code|code|otp)[^A-Za-z0-9]{1,25}\b([A-Z0-9]{6})\b"
         m2 = re.search(kw_alnum, clean, flags=re.IGNORECASE)
         if m2:
             cand = m2.group(1)
             if any(ch.isdigit() for ch in cand):
                 return cand
-
-        # 4. Fallback 4-8 digit number (skipping years like 2024..2029)
-        other_digits = re.findall(r"\b(\d{4,8})\b", clean)
-        for c in other_digits:
-            if len(c) == 4 and c.startswith("202"):
-                continue
-            return c
 
         return None
 
@@ -245,10 +253,10 @@ class GmailOTPFetcher:
     ) -> Optional[str]:
         """
         Ultra-Fast (<1s) Direct Mailbox OTP Fetcher:
-        - Queries `messages.list(userId='me', maxResults=8)` directly WITHOUT `q=` search index lag!
-        - Checks newest messages first.
-        - Matches `target_email` (or any forwarded email on `@nariwal.shop` / `mobile.j3pro@gmail.com`).
-        - Extracts OTP from Subject + Snippet first (instant!), then full body.
+        - Queries `messages.list(userId='me', maxResults=10)` directly WITHOUT `q=` search index lag!
+        - Strictly matches `target_email` against recipient headers (`To`, `Delivered-To`, `X-Forwarded-To`)
+          so notification emails sent to the old email (which mention the new email in the body) are never confused!
+        - Skips non-OTP alert subjects (`Did you just add...`, `Did you just remove...`).
         """
         if not self.service:
             if not self.try_silent_connect(log_fn=log_fn):
@@ -257,10 +265,8 @@ class GmailOTPFetcher:
 
         now_ms = int(time.time() * 1000)
         if min_epoch_ms <= 0:
-            # Look back 3 minutes if triggered manually via F7 or Test button
             effective_min_ms = now_ms - 180_000
         else:
-            # Allow a generous 45-second grace window to prevent PC clock skew or fast email arrival issues
             effective_min_ms = min_epoch_ms - 45_000
 
         log_fn(
@@ -277,11 +283,10 @@ class GmailOTPFetcher:
 
             attempt += 1
             try:
-                # Direct mailbox list (NO `q=` filter -> zero Gmail search indexing delay!)
                 res = (
                     self.service.users()
                     .messages()
-                    .list(userId="me", maxResults=8, includeSpamTrash=True)
+                    .list(userId="me", maxResults=10, includeSpamTrash=True)
                     .execute()
                 )
                 messages = res.get("messages", [])
@@ -289,12 +294,9 @@ class GmailOTPFetcher:
                 for msg_meta in messages:
                     msg_id = msg_meta["id"]
 
-                    # Skip only if we already consumed & typed this exact message's OTP
                     if msg_id in self.consumed_message_ids:
                         continue
 
-                    # If we took a pre-signup snapshot right before F2/F4, skip messages that were already in the inbox before F2/F4
-                    # UNLESS the user didn't press F2/F4 (e.g. manual F7 test)
                     if min_epoch_ms > 0 and msg_id in self.pre_signup_message_ids:
                         continue
 
@@ -307,7 +309,6 @@ class GmailOTPFetcher:
 
                     internal_date_ms = int(msg.get("internalDate", "0"))
 
-                    # Check freshness: either arrived after pre-signup Gmail baseline or within effective time window
                     if self.baseline_gmail_epoch_ms > 0 and min_epoch_ms > 0:
                         if internal_date_ms < (self.baseline_gmail_epoch_ms - 10_000):
                             continue
@@ -337,18 +338,29 @@ class GmailOTPFetcher:
                         ):
                             recipient_headers += " " + hval
 
+                    low_subj = subject.strip().lower()
+                    if any(pat in low_subj for pat in IGNORED_SUBJECT_PATTERNS):
+                        continue
+
                     snippet = msg.get("snippet", "")
                     body_text = self._extract_body_text(payload)
                     fast_text = f"{subject}\n{snippet}"
                     full_text = f"{subject}\n{snippet}\n{body_text}"
 
-                    # Recipient check: match target_email if specified
+                    # Strict Recipient Match:
+                    # If `recipient_headers` has an email address, `target_email` MUST match `recipient_headers`!
+                    # This prevents an alert sent TO `mobile.j3pro@gmail.com` (that mentions `@nariwal.shop` in its body)
+                    # from matching when waiting for `@nariwal.shop`'s OTP.
                     if target_email:
-                        combined_haystack = (recipient_headers + " " + full_text).lower()
-                        if target_email.lower() not in combined_haystack:
-                            continue
+                        t_low = target_email.strip().lower()
+                        rec_low = recipient_headers.lower()
+                        if "@" in rec_low:
+                            if t_low not in rec_low:
+                                continue
+                        else:
+                            if t_low not in full_text.lower():
+                                continue
 
-                    # Try fast extraction from Subject + Snippet first, then full body
                     otp = self.extract_otp_from_text(fast_text, custom_regex=custom_regex)
                     if not otp:
                         otp = self.extract_otp_from_text(full_text, custom_regex=custom_regex)
