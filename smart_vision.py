@@ -324,12 +324,13 @@ def smart_locate_target_on_screen(
     template_b64: str = "",
     current_test_email: Optional[str] = None,
     domain_hint: str = "nariwal.shop",
+    secondary_email_hint: str = "",
     vertical_list_mode: bool = False,
 ) -> Optional[Tuple[int, int, str]]:
     """
     Master Smart Target Locator:
     1. Searches a 2x-upscaled vertical column strip around `(expected_x, expected_y)` (±260px X, ±340px Y)
-       for ultra-accurate detection of moved list rows (`@nariwal.shop`, `mobile.j3pro@gmail.com`, `Add new contact info`).
+       for ultra-accurate detection of moved list rows (`@nariwal.shop`, any 2nd Email `[F4]`, `Add new contact info`).
     2. If `vertical_list_mode=True`, keeps the horizontal click position near `expected_x` and only shifts Y
        to the moved row so it never clicks off-target horizontally.
     """
@@ -341,10 +342,17 @@ def smart_locate_target_on_screen(
     queries: List[str] = []
     if anchor_text:
         clean_dom = domain_hint.strip().lstrip("@").lower() or "nariwal.shop"
-        if anchor_text.strip().lower() in ("{current_email}", f"@{clean_dom}", clean_dom):
+        clean_sec = secondary_email_hint.strip()
+        low_anc = anchor_text.strip().lower()
+        if low_anc in ("{current_email}", f"@{clean_dom}", clean_dom):
             if current_test_email and clean_dom in current_test_email.lower():
                 queries.append(current_test_email)
             queries.append(f"@{clean_dom}")
+        elif low_anc in ("{secondary_email}", "mobile.j3pro@gmail.com") and clean_sec:
+            # Dynamically use whatever 2nd Email [F4] is currently configured in the UI!
+            queries.append(clean_sec)
+            if clean_sec.lower() != low_anc:
+                queries.append(anchor_text.strip())
         else:
             queries.append(anchor_text.strip())
 

@@ -2275,6 +2275,7 @@ class ActionRecorderBot:
                                         template_b64="",
                                         current_test_email=self.current_test_email,
                                         domain_hint=self.domain_var.get(),
+                                        secondary_email_hint=self.secondary_email_var.get(),
                                         vertical_list_mode=True,
                                     )
                                     if found:
@@ -2334,6 +2335,7 @@ class ActionRecorderBot:
                                 template_b64=tmpl_b64,
                                 current_test_email=self.current_test_email,
                                 domain_hint=self.domain_var.get(),
+                                secondary_email_hint=self.secondary_email_var.get(),
                             )
                             if found:
                                 break
