@@ -212,6 +212,9 @@ class ActionRecorderBot:
         # Silent Gmail OAuth connection on startup if token.json exists
         threading.Thread(target=self._auto_connect_gmail_startup, daemon=True).start()
 
+        # Start Background RDP Disconnect Watchdog (Auto-switches to Virtual Display Console if RDP is closed)
+        self._start_rdp_disconnect_watchdog()
+
     def _auto_connect_gmail_startup(self):
         if os.path.exists(self.gmail_fetcher.creds_path):
             self.log(f"✓ Found OAuth credentials ({os.path.basename(self.gmail_fetcher.creds_path)}).")
@@ -433,10 +436,24 @@ class ActionRecorderBot:
             text_color="white",
             corner_radius=9,
             height=36,
-            width=210,
+            width=192,
             command=self.detach_rdp_keep_vm_alive,
         )
         self.vm_detach_btn.pack(side="right")
+
+        self.vdd_setup_btn = ctk.CTkButton(
+            dock_inner,
+            text="🖥 Virtual Display",
+            font=self.font_btn,
+            fg_color="#4F46E5",
+            hover_color="#4338CA",
+            text_color="white",
+            corner_radius=9,
+            height=36,
+            width=138,
+            command=self.setup_virtual_display_clicked,
+        )
+        self.vdd_setup_btn.pack(side="right", padx=(0, 6))
 
         # -------------------- 3. TWO-COLUMN BENTO SETTINGS GRID --------------------
         bento_row = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -1485,29 +1502,220 @@ class ActionRecorderBot:
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    # -------------------- AZURE / AWS EC2 WINDOWS VM KEEP-ALIVE & AUTO-PLAY --------------------
-    def _force_console_resolution(self, target_w: int, target_h: int):
-        """Ensure VM Console screen resolution matches the recorded macro resolution (e.g. 1920x1080)."""
+    # -------------------- AZURE / AWS EC2 VIRTUAL DISPLAY & VM KEEP-ALIVE --------------------
+    def _get_current_session_id(self) -> int:
+        """Return exact Windows Session ID for this Python process via Kernel32 ProcessIdToSessionId."""
         try:
-            import subprocess
+            sid = ctypes.c_uint32(0)
+            ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(sid))
+            return int(sid.value)
+        except Exception:
+            return 1
+
+    def _is_rdp_session_disconnected(self) -> bool:
+        """Check via WTSQuerySessionInformationW if the current session is in WTSDisconnected (4) state."""
+        try:
+            WTS_CURRENT_SERVER_HANDLE = 0
+            WTS_CURRENT_SESSION = -1
+            WTSConnectState = 8
+            ppBuffer = ctypes.c_void_p()
+            pBytesReturned = ctypes.c_uint32(0)
+            res = ctypes.windll.wtsapi32.WTSQuerySessionInformationW(
+                WTS_CURRENT_SERVER_HANDLE,
+                WTS_CURRENT_SESSION,
+                WTSConnectState,
+                ctypes.byref(ppBuffer),
+                ctypes.byref(pBytesReturned),
+            )
+            if res and ppBuffer.value:
+                state = ctypes.c_int.from_address(ppBuffer.value).value
+                ctypes.windll.wtsapi32.WTSFreeMemory(ppBuffer)
+                # 4 == WTSDisconnected
+                if state == 4:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _is_input_desktop_ready(self) -> bool:
+        """Verify that Windows has an active unlocked input desktop ready for Mouse/Keyboard injection."""
+        try:
+            hdesk = ctypes.windll.user32.OpenInputDesktop(0, False, 0x0100)
+            if hdesk:
+                ctypes.windll.user32.CloseDesktop(hdesk)
+                return True
+            return False
+        except Exception:
+            return True
+
+    def _force_console_resolution(self, target_w: int = 1920, target_h: int = 1080):
+        """Force Virtual Display / Console screen resolution via native Win32 ChangeDisplaySettingsW API."""
+        try:
             cur = get_full_screen_bounds()
             if cur["width"] == target_w and cur["height"] == target_h:
                 return
-            subprocess.run(
-                [
-                    "powershell",
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    f"try {{ Set-DisplayResolution -Width {target_w} -Height {target_h} -Force -ErrorAction SilentlyContinue }} catch {{}}",
-                ],
-                capture_output=True,
-                timeout=5,
-                creationflags=0x08000000,  # CREATE_NO_WINDOW
-            )
+            # Construct DEVMODEW buffer (220 bytes)
+            dm = (ctypes.c_byte * 220)()
+            ctypes.memset(dm, 0, 220)
+            ctypes.c_uint16.from_buffer(dm, 68).value = 220  # dmSize
+            # DM_BITSPERPEL (0x40000) | DM_PELSWIDTH (0x80000) | DM_PELSHEIGHT (0x100000) | DM_DISPLAYFREQUENCY (0x400000)
+            ctypes.c_uint32.from_buffer(dm, 72).value = 0x005C0000
+            ctypes.c_uint32.from_buffer(dm, 168).value = 32
+            ctypes.c_uint32.from_buffer(dm, 172).value = int(target_w)
+            ctypes.c_uint32.from_buffer(dm, 176).value = int(target_h)
+            ctypes.c_uint32.from_buffer(dm, 184).value = 60
+            ctypes.windll.user32.ChangeDisplaySettingsW(ctypes.byref(dm), 0)
         except Exception:
             pass
+
+    def _ensure_virtual_display_driver(self, target_w: int = 1920, target_h: int = 1080, verbose: bool = True) -> bool:
+        """
+        Ensure Amyuni Signed WDDM Virtual Monitor (usbmmidd_v2) is installed & active on AWS EC2 / Azure VM,
+        and lock Virtual Display resolution to target_w x target_h (default 1920x1080).
+        """
+        import subprocess
+        CREATE_NO_WINDOW = 0x08000000
+        vdd_dir = r"C:\usbmmidd_v2"
+        exe_path = os.path.join(vdd_dir, "deviceinstaller64.exe")
+
+        try:
+            # 1. Apply Registry Keep-Alive & No-Lock policies
+            reg_cmds = [
+                r'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\Personalization" /v NoLockScreen /t REG_DWORD /d 1 /f',
+                r'reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v DisableLockWorkstation /t REG_DWORD /d 1 /f',
+                r'reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v InactivityTimeoutSecs /t REG_DWORD /d 0 /f',
+                r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Lsa" /v LimitBlankPasswordUse /t REG_DWORD /d 0 /f',
+                r'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v MaxDisconnectionTime /t REG_DWORD /d 0 /f',
+                r'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v MaxIdleTime /t REG_DWORD /d 0 /f',
+                r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fSingleSessionPerUser /t REG_DWORD /d 0 /f',
+            ]
+            for rc in reg_cmds:
+                subprocess.run(rc, shell=True, capture_output=True, creationflags=CREATE_NO_WINDOW)
+
+            # 2. Download usbmmidd_v2 if not already installed
+            if not os.path.exists(exe_path):
+                if verbose:
+                    self.log("🖥 Downloading Signed Virtual Monitor Driver (usbmmidd_v2) for AWS EC2...")
+                ps_dl = (
+                    "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
+                    "$zip = Join-Path $env:TEMP 'usbmmidd_v2.zip'; "
+                    "Invoke-WebRequest -Uri 'https://www.amyuni.com/downloads/usbmmidd_v2.zip' -OutFile $zip -UseBasicParsing; "
+                    "Expand-Archive -Path $zip -DestinationPath 'C:\\' -Force"
+                )
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_dl],
+                    capture_output=True,
+                    timeout=35,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+
+            # 3. Install & Enable Virtual Monitor
+            if os.path.exists(exe_path):
+                if verbose:
+                    self.log(f"🖥 Activating Virtual Monitor Adapter ({target_w}×{target_h})...")
+                subprocess.run(
+                    [exe_path, "install", "usbmmidd.inf", "usbmmidd"],
+                    cwd=vdd_dir,
+                    capture_output=True,
+                    timeout=15,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                subprocess.run(
+                    [exe_path, "enableidd", "1"],
+                    cwd=vdd_dir,
+                    capture_output=True,
+                    timeout=10,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                self._force_console_resolution(target_w, target_h)
+                if verbose:
+                    self.log(f"✅ Virtual Display Driver Active! Console locked to {target_w}×{target_h}.")
+                return True
+            else:
+                # Fallback to running setup_virtual_display.bat with RunAs elevation
+                bat_setup = os.path.join(self.base_dir, "setup_virtual_display.bat")
+                if os.path.exists(bat_setup):
+                    ctypes.windll.shell32.ShellExecuteW(
+                        None, "runas", "cmd.exe", f'/c ""{bat_setup}""', self.base_dir, 1
+                    )
+                return False
+        except Exception as e:
+            if verbose:
+                self.log(f"⚠ Virtual Display setup warning: {e}")
+            return False
+
+    def setup_virtual_display_clicked(self):
+        """1-Click UI button handler to install & activate the 1920x1080 Virtual Display on EC2."""
+        def _worker():
+            rec_w = int(self.events[0].get("screen_w", 1920)) if self.events else 1920
+            rec_h = int(self.events[0].get("screen_h", 1080)) if self.events else 1080
+            self.log(f"🖥 Setting up {rec_w}×{rec_h} Virtual Display for Headless AWS EC2 / Azure VM...")
+            ok = self._ensure_virtual_display_driver(rec_w, rec_h, verbose=True)
+            if ok:
+                self.root.after(
+                    0,
+                    lambda: self.vdd_setup_btn.configure(
+                        text="✓ Virtual Display Ready", fg_color="#059669", hover_color="#047857"
+                    ),
+                )
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _transfer_current_session_to_console(self, target_w: int = 1920, target_h: int = 1080):
+        """Transfer this process's exact Windows Session ID to the Virtual Monitor Console session."""
+        import subprocess
+        CREATE_NO_WINDOW = 0x08000000
+        sid = self._get_current_session_id()
+        tscon_exe = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "tscon.exe")
+        bat_path = os.path.join(self.base_dir, "keep_vm_screen_alive.bat")
+
+        # 1. Try direct tscon execution first (works immediately without popup when running as Admin)
+        res = subprocess.run(
+            [tscon_exe, str(sid), "/dest:console"],
+            capture_output=True,
+            creationflags=CREATE_NO_WINDOW,
+        )
+        if res.returncode != 0 and os.path.exists(bat_path):
+            # Fallback to elevated batch script passing exact Session ID
+            try:
+                ctypes.windll.shell32.ShellExecuteW(
+                    None, "runas", "cmd.exe", f'/c ""{bat_path}" {sid}"', self.base_dir, 0
+                )
+            except Exception:
+                pass
+
+        # 2. Wait for Console desktop transition and lock Virtual Display resolution
+        for _ in range(20):
+            time.sleep(0.25)
+            if self._is_input_desktop_ready() and not self._is_rdp_session_disconnected():
+                break
+
+        self._force_console_resolution(target_w, target_h)
+        self.screen = get_full_screen_bounds()
+
+    def _start_rdp_disconnect_watchdog(self):
+        """
+        Background Watchdog: If the user closes their RDP window via the top-right [X] button,
+        automatically re-attach the disconnected session to the 1920x1080 Virtual Display Console!
+        """
+        def _watchdog():
+            last_heal_time = 0.0
+            while True:
+                time.sleep(1.5)
+                try:
+                    if self._is_rdp_session_disconnected():
+                        now = time.perf_counter()
+                        if now - last_heal_time > 5.0:
+                            last_heal_time = now
+                            rec_w = int(self.events[0].get("screen_w", 1920)) if self.events else 1920
+                            rec_h = int(self.events[0].get("screen_h", 1080)) if self.events else 1080
+                            self.log(
+                                f"⚡ Watchdog detected RDP disconnect! Auto-attaching session to {rec_w}×{rec_h} Virtual Display Console..."
+                            )
+                            self._transfer_current_session_to_console(rec_w, rec_h)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_watchdog, daemon=True).start()
 
     def detach_rdp_keep_vm_alive(self):
         if self.is_recording:
@@ -1526,17 +1734,9 @@ class ActionRecorderBot:
         rec_w = int(self.events[0].get("screen_w", self.screen["width"]))
         rec_h = int(self.events[0].get("screen_h", self.screen["height"]))
 
-        bat_path = os.path.join(self.base_dir, "keep_vm_screen_alive.bat")
         self.log(
-            f"☁ Detaching RDP to VM Console ({rec_w}×{rec_h}) & auto-starting Macro Playback in 3.5s..."
+            f"☁ Preparing {rec_w}×{rec_h} Virtual Display, detaching RDP to Console & auto-starting Macro Playback..."
         )
-
-        try:
-            ctypes.windll.shell32.ShellExecuteW(
-                None, "runas", "cmd.exe", f'/c ""{bat_path}""', self.base_dir, 1
-            )
-        except Exception as e:
-            self.log(f"⚠ Could not launch VM Keep-Alive script: {e}")
 
         if not self.is_playing:
             self.start_playback(vm_detach_mode=True, target_res=(rec_w, rec_h))
@@ -1937,18 +2137,24 @@ class ActionRecorderBot:
         target_res: Optional[tuple] = None,
     ):
         if vm_detach_mode:
+            tw, th = target_res if target_res else (1920, 1080)
+            self._ensure_virtual_display_driver(tw, th, verbose=True)
             if self.auto_min_var.get():
                 self.root.after(0, self.root.iconify)
-            for sec_left in (3, 2, 1):
+            self.log(f"⏳ Switching RDP Session #{self._get_current_session_id()} to {tw}×{th} Virtual Display Console...")
+            time.sleep(0.5)
+            self._transfer_current_session_to_console(tw, th)
+            for sec_left in (2, 1):
                 if self.stop_playback_flag:
                     break
-                self.log(f"⏳ VM Console handoff in {sec_left}s — Macro Playback starting...")
                 time.sleep(1.0)
-            if target_res:
-                self._force_console_resolution(target_res[0], target_res[1])
-                time.sleep(0.4)
+            self._force_console_resolution(tw, th)
             try:
                 ctypes.windll.kernel32.SetThreadExecutionState(0x80000003)
+                # Ensure foreground browser window stays maximized after Virtual Display handoff
+                fg_hwnd = ctypes.windll.user32.GetForegroundWindow()
+                if fg_hwnd:
+                    ctypes.windll.user32.ShowWindow(fg_hwnd, 3)  # SW_MAXIMIZE = 3
             except Exception:
                 pass
         elif self.auto_min_var.get():
