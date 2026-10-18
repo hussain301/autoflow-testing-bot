@@ -426,14 +426,14 @@ class ActionRecorderBot:
 
         self.vm_detach_btn = ctk.CTkButton(
             dock_inner,
-            text="☁ VM Keep-Alive (Close RDP)",
+            text="☁ VM Detach & Auto-Play",
             font=self.font_btn,
             fg_color="#0284C7",
             hover_color="#0369A1",
             text_color="white",
             corner_radius=9,
             height=36,
-            width=205,
+            width=210,
             command=self.detach_rdp_keep_vm_alive,
         )
         self.vm_detach_btn.pack(side="right")
@@ -1485,25 +1485,83 @@ class ActionRecorderBot:
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    # -------------------- AZURE / AWS EC2 WINDOWS VM KEEP-ALIVE (DETACH RDP) --------------------
+    # -------------------- AZURE / AWS EC2 WINDOWS VM KEEP-ALIVE & AUTO-PLAY --------------------
+    def _force_console_resolution(self, target_w: int, target_h: int):
+        """Ensure VM Console screen resolution matches the recorded macro resolution (e.g. 1920x1080)."""
+        try:
+            import subprocess
+            cur = get_full_screen_bounds()
+            if cur["width"] == target_w and cur["height"] == target_h:
+                return
+            subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    f"try {{ Set-DisplayResolution -Width {target_w} -Height {target_h} -Force -ErrorAction SilentlyContinue }} catch {{}}",
+                ],
+                capture_output=True,
+                timeout=5,
+                creationflags=0x08000000,  # CREATE_NO_WINDOW
+            )
+        except Exception:
+            pass
+
     def detach_rdp_keep_vm_alive(self):
+        if self.is_recording:
+            self.stop_recording(from_gui_button=False)
+
+        if not self.events and os.path.exists(self.default_file):
+            self._load_from_path(self.default_file, silent=True)
+
+        if not self.events:
+            messagebox.showinfo(
+                "No Macro Loaded",
+                "Pehle macro record karein ya 'Load' button se recorded_actions.json load karein!",
+            )
+            return
+
+        rec_w = int(self.events[0].get("screen_w", self.screen["width"]))
+        rec_h = int(self.events[0].get("screen_h", self.screen["height"]))
+
+        sid = ctypes.c_ulong(0)
+        try:
+            ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(sid))
+            active_sid = sid.value
+        except Exception:
+            active_sid = ""
+
         confirm = messagebox.askyesno(
-            "Azure / AWS EC2 VM Keep-Alive (Close RDP Safely)",
-            "Jab aap Azure ya EC2 Windows VM ko normal [X] se band karte hain, toh Windows screen lock kar deta hai aur mouse/keyboard ruk jata hai.\n\n"
-            "Yeh button aapke RDP session ko VM ke internal 'Console Screen' par shift kar dega (tscon /dest:console):\n"
-            "  • Aapki RDP window band ho jayegi\n"
-            "  • VM ke andar Screen 100% ON aur Unlocked rahegi\n"
-            "  • Bot peeche 24/7 Browser clicks + OTP testing karta rahega!\n\n"
-            "Kya aap abhi RDP safely detach karna chahte hain? (Run Bot as Administrator on VM)",
+            "☁ VM Detach RDP & Auto-Play Macro",
+            f"Yeh smart mode aapke Active RDP Session (ID: {active_sid}) ko VM ke internal Console ({rec_w}×{rec_h}) par shift karega aur khud Macro Loops start kar dega:\n\n"
+            "  1. Bot window minimize ho jayegi\n"
+            "  2. Aapki RDP window safely disconnect ho jayegi (VM Unlocked rahegi)\n"
+            "  3. 4 second baad VM Console par Macro Playback automatically start ho jayega!\n\n"
+            "Kya aap abhi RDP detach kar ke Macro Auto-Play start karna chahte hain?",
         )
         if not confirm:
             return
 
         bat_path = os.path.join(self.base_dir, "keep_vm_screen_alive.bat")
-        self.log("☁ Detaching RDP session to Console so VM screen stays 100% active in background...")
+        self.log(
+            f"☁ Detaching RDP Session [{active_sid}] to VM Console ({rec_w}×{rec_h}) & auto-starting Macro Playback..."
+        )
+
+        # Minimize bot first so the Desktop / Browser is in front when Console takes over
+        self.root.iconify()
+        time.sleep(0.25)
+
+        # Start playback in VM Detach Mode (waits for tscon console handoff before clicking!)
+        if not self.is_playing:
+            self.start_playback(vm_detach_mode=True, target_res=(rec_w, rec_h))
+
         try:
+            params = f'/c ""{bat_path}" {active_sid} {rec_w} {rec_h} AUTO"'
+            # SW_HIDE = 0 so no black CMD window covers the browser on the VM console
             ctypes.windll.shell32.ShellExecuteW(
-                None, "runas", "cmd.exe", f'/c ""{bat_path}""', self.base_dir, 1
+                None, "runas", "cmd.exe", params, self.base_dir, 0
             )
         except Exception as e:
             self.log(f"⚠ Could not launch VM Keep-Alive script: {e}")
@@ -1847,7 +1905,7 @@ class ActionRecorderBot:
             self.stop_playback_flag = True
             self.log("■ Stopping playback...")
 
-    def start_playback(self):
+    def start_playback(self, vm_detach_mode: bool = False, target_res: Optional[tuple] = None):
         if not self.events:
             messagebox.showinfo(
                 "No Actions", "Please record some actions or load a JSON file first!"
@@ -1876,7 +1934,7 @@ class ActionRecorderBot:
 
         play_thread = threading.Thread(
             target=self._playback_worker,
-            args=(speed, loops),
+            args=(speed, loops, vm_detach_mode, target_res),
             daemon=True,
         )
         play_thread.start()
@@ -1896,8 +1954,38 @@ class ActionRecorderBot:
             return True
         return False
 
-    def _playback_worker(self, speed: float, loops: int):
-        if self.auto_min_var.get():
+    def _playback_worker(
+        self,
+        speed: float,
+        loops: int,
+        vm_detach_mode: bool = False,
+        target_res: Optional[tuple] = None,
+    ):
+        if vm_detach_mode:
+            self.log("☁ Waiting for RDP detach & VM Console handoff (tscon)...")
+            wait_t = time.perf_counter()
+            # SM_REMOTESESSION = 0x1000 (1 = RDP session, 0 = VM Console session)
+            while time.perf_counter() - wait_t < 12.0 and not self.stop_playback_flag:
+                try:
+                    if ctypes.windll.user32.GetSystemMetrics(0x1000) == 0:
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.25)
+
+            # Give the VM Console display driver 3.5s to finish initializing after tscon
+            time.sleep(3.5)
+            if target_res:
+                self._force_console_resolution(target_res[0], target_res[1])
+                time.sleep(0.8)
+            try:
+                ctypes.windll.kernel32.SetThreadExecutionState(0x80000003)
+            except Exception:
+                pass
+            if self.auto_min_var.get():
+                self.root.after(0, self.root.iconify)
+                time.sleep(0.25)
+        elif self.auto_min_var.get():
             time.sleep(0.25)
 
         has_otp_step = any(ev.get("type") == "fetch_and_type_otp" for ev in self.events)
@@ -1924,7 +2012,17 @@ class ActionRecorderBot:
                 if loops > 0 and loop_num > loops:
                     break
 
-                self.log(f"⟳ Running Signup Loop #{loop_num}...")
+                # Ensure VM screen stays awake and bot stays minimized at the start of every loop
+                try:
+                    ctypes.windll.kernel32.SetThreadExecutionState(0x80000003)
+                except Exception:
+                    pass
+                if self.auto_min_var.get() and self.root.state() != "iconic":
+                    self.root.after(0, self.root.iconify)
+                    time.sleep(0.15)
+
+                self.screen = get_full_screen_bounds()
+                self.log(f"⟳ Running Signup Loop #{loop_num} on ({self.screen['width']}×{self.screen['height']})...")
 
                 self.email_typed_epoch_ms = int(time.time() * 1000)
                 loop_start_clock = time.perf_counter()

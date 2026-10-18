@@ -1,35 +1,52 @@
 @echo off
-title Azure / AWS EC2 Windows VM Keep-Alive (Detach RDP Safely)
-color 0B
-echo ============================================================================
-echo   AZURE / AWS EC2 WINDOWS VM KEEP-ALIVE (DETACH RDP TO VIRTUAL CONSOLE)
-echo ============================================================================
-echo.
-echo  Jab aap RDP ko normal [X] button se close karte hain, toh Windows session
-echo  Lock/Disconnect ho jata hai aur Mouse/Keyboard automation ruk jati hai.
-echo.
-echo  Yeh script aapke RDP session ko VM ke internal "console" screen par shift
-echo  kar degi taake RDP band hone ke baad bhi VM ki screen 100%% ON rahe!
-echo ============================================================================
-echo.
+title Azure / AWS EC2 Windows VM Keep-Alive & Console Auto-Play
+set "TARGET_SID=%~1"
+set "TARGET_W=%~2"
+set "TARGET_H=%~3"
+set "AUTO_MODE=%~4"
 
-:: Disable Windows sleep & screen turn-off timeouts
+if "%TARGET_W%"=="" set "TARGET_W=1920"
+if "%TARGET_H%"=="" set "TARGET_H=1080"
+
+:: 1. Disable Windows sleep, monitor turn-off, lock screen & inactivity timeouts
 powercfg /change monitor-timeout-ac 0 >nul 2>&1
 powercfg /change monitor-timeout-dc 0 >nul 2>&1
 powercfg /change standby-timeout-ac 0 >nul 2>&1
 powercfg /change standby-timeout-dc 0 >nul 2>&1
+powercfg /change hibernate-timeout-ac 0 >nul 2>&1
+powercfg /change hibernate-timeout-dc 0 >nul 2>&1
 
-:: Transfer active RDP sessions to Console so GUI/Mouse/Browser stays active 24/7
-for /f "skip=1 tokens=3" %%s in ('query user %USERNAME%') do (
-    echo Shifting session ID %%s to Console...
-    %windir%\System32\tscon.exe %%s /dest:console
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\Personalization" /v NoLockScreen /t REG_DWORD /d 1 /f >nul 2>&1
+reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v InactivityTimeoutSecs /t REG_DWORD /d 0 /f >nul 2>&1
+reg add "HKCU\Control Panel\Desktop" /v ScreenSaveActive /t REG_SZ /d "0" /f >nul 2>&1
+reg add "HKCU\Control Panel\Desktop" /v SCRNSAVE.EXE /t REG_SZ /d "" /f >nul 2>&1
+
+:: 2. Find exact active Session ID if not passed from Python
+if "%TARGET_SID%"=="" (
+    for /f "usebackq tokens=*" %%i in (`powershell -NoProfile -Command "(Get-Process -Id $PID).SessionId"`) do (
+        set "TARGET_SID=%%i"
+    )
 )
 
-for %%i in (1 2 3 4 5) do (
-    %windir%\System32\tscon.exe %%i /dest:console >nul 2>&1
+if "%TARGET_SID%"=="" (
+    for /f "tokens=1,2,3,4" %%a in ('query session') do (
+        echo %%a | findstr /b ">" >nul && (
+            set "TARGET_SID=%%c"
+        )
+    )
 )
 
-echo.
-echo Done! If your RDP window did not close, right-click this file and select
-echo "Run as administrator" inside your Azure / EC2 Windows VM.
-timeout /t 4
+echo Shifting Active Session ID [%TARGET_SID%] to VM Console...
+if not "%TARGET_SID%"=="" (
+    %windir%\System32\tscon.exe %TARGET_SID% /dest:console
+)
+
+:: 3. Wait 2 seconds for Console Display Driver handoff, then lock Console Resolution to match Recording (e.g. 1920x1080)
+timeout /t 2 /nobreak >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Set-DisplayResolution -Width %TARGET_W% -Height %TARGET_H% -Force -ErrorAction SilentlyContinue } catch {}" >nul 2>&1
+
+if /i not "%AUTO_MODE%"=="AUTO" (
+    echo.
+    echo Done! VM Session [%TARGET_SID%] is now active on Console (%TARGET_W%x%TARGET_H%).
+    timeout /t 2 >nul 2>&1
+)

@@ -14,17 +14,25 @@ except ImportError:
     HAS_WINOCR = False
 
 
+import time
+
+
 def grab_full_screen_pil(screen_bounds: dict) -> Image.Image:
-    """Capture the full virtual screen as a PIL RGB Image."""
+    """Capture the full virtual screen as a PIL RGB Image (resilient to VM console display switches)."""
     ox = screen_bounds.get("origin_x", 0)
     oy = screen_bounds.get("origin_y", 0)
-    w = screen_bounds.get("width", 1920)
-    h = screen_bounds.get("height", 1080)
+    w = max(1, int(screen_bounds.get("width", 1920)))
+    h = max(1, int(screen_bounds.get("height", 1080)))
     bbox = (ox, oy, ox + w, oy + h)
-    try:
-        return ImageGrab.grab(bbox=bbox, all_screens=True).convert("RGB")
-    except Exception:
-        return ImageGrab.grab().convert("RGB")
+    for _ in range(3):
+        try:
+            return ImageGrab.grab(bbox=bbox, all_screens=True).convert("RGB")
+        except Exception:
+            try:
+                return ImageGrab.grab().convert("RGB")
+            except Exception:
+                time.sleep(0.18)
+    return Image.new("RGB", (w, h), (0, 0, 0))
 
 
 def crop_around_point(
