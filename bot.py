@@ -1526,45 +1526,20 @@ class ActionRecorderBot:
         rec_w = int(self.events[0].get("screen_w", self.screen["width"]))
         rec_h = int(self.events[0].get("screen_h", self.screen["height"]))
 
-        sid = ctypes.c_ulong(0)
-        try:
-            ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(sid))
-            active_sid = sid.value
-        except Exception:
-            active_sid = ""
-
-        confirm = messagebox.askyesno(
-            "☁ VM Detach RDP & Auto-Play Macro",
-            f"Yeh smart mode aapke Active RDP Session (ID: {active_sid}) ko VM ke internal Console ({rec_w}×{rec_h}) par shift karega aur khud Macro Loops start kar dega:\n\n"
-            "  1. Bot window minimize ho jayegi\n"
-            "  2. Aapki RDP window safely disconnect ho jayegi (VM Unlocked rahegi)\n"
-            "  3. 4 second baad VM Console par Macro Playback automatically start ho jayega!\n\n"
-            "Kya aap abhi RDP detach kar ke Macro Auto-Play start karna chahte hain?",
-        )
-        if not confirm:
-            return
-
         bat_path = os.path.join(self.base_dir, "keep_vm_screen_alive.bat")
         self.log(
-            f"☁ Detaching RDP Session [{active_sid}] to VM Console ({rec_w}×{rec_h}) & auto-starting Macro Playback..."
+            f"☁ Detaching RDP to VM Console ({rec_w}×{rec_h}) & auto-starting Macro Playback in 3.5s..."
         )
 
-        # Minimize bot first so the Desktop / Browser is in front when Console takes over
-        self.root.iconify()
-        time.sleep(0.25)
-
-        # Start playback in VM Detach Mode (waits for tscon console handoff before clicking!)
-        if not self.is_playing:
-            self.start_playback(vm_detach_mode=True, target_res=(rec_w, rec_h))
-
         try:
-            params = f'/c ""{bat_path}" {active_sid} {rec_w} {rec_h} AUTO"'
-            # SW_HIDE = 0 so no black CMD window covers the browser on the VM console
             ctypes.windll.shell32.ShellExecuteW(
-                None, "runas", "cmd.exe", params, self.base_dir, 0
+                None, "runas", "cmd.exe", f'/c ""{bat_path}""', self.base_dir, 1
             )
         except Exception as e:
             self.log(f"⚠ Could not launch VM Keep-Alive script: {e}")
+
+        if not self.is_playing:
+            self.start_playback(vm_detach_mode=True, target_res=(rec_w, rec_h))
 
     # -------------------- RECORDING (START / PAUSE / RESUME / STOP) --------------------
     def toggle_recording(self, from_gui_button: bool = False):
@@ -1962,29 +1937,20 @@ class ActionRecorderBot:
         target_res: Optional[tuple] = None,
     ):
         if vm_detach_mode:
-            self.log("☁ Waiting for RDP detach & VM Console handoff (tscon)...")
-            wait_t = time.perf_counter()
-            # SM_REMOTESESSION = 0x1000 (1 = RDP session, 0 = VM Console session)
-            while time.perf_counter() - wait_t < 12.0 and not self.stop_playback_flag:
-                try:
-                    if ctypes.windll.user32.GetSystemMetrics(0x1000) == 0:
-                        break
-                except Exception:
-                    pass
-                time.sleep(0.25)
-
-            # Give the VM Console display driver 3.5s to finish initializing after tscon
-            time.sleep(3.5)
+            if self.auto_min_var.get():
+                self.root.after(0, self.root.iconify)
+            for sec_left in (3, 2, 1):
+                if self.stop_playback_flag:
+                    break
+                self.log(f"⏳ VM Console handoff in {sec_left}s — Macro Playback starting...")
+                time.sleep(1.0)
             if target_res:
                 self._force_console_resolution(target_res[0], target_res[1])
-                time.sleep(0.8)
+                time.sleep(0.4)
             try:
                 ctypes.windll.kernel32.SetThreadExecutionState(0x80000003)
             except Exception:
                 pass
-            if self.auto_min_var.get():
-                self.root.after(0, self.root.iconify)
-                time.sleep(0.25)
         elif self.auto_min_var.get():
             time.sleep(0.25)
 
