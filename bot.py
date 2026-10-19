@@ -198,11 +198,14 @@ class ActionRecorderBot:
         self.custom_reference_template_b64 = ""
 
         # Browser-Safe OS-Suppressed Hotkeys
-        # F2 = Random @nariwal.shop | F3 = Smart Visual/OCR Click | F4 = mobile.j3pro@gmail.com
-        # F6 = Pause/Resume Rec     | F7 = Fetch OTP              | F8 = Record/Stop | F9 = Play | F10 = Stop
-        self.control_keys = {Key.f2, Key.f3, Key.f4, Key.f6, Key.f7, Key.f8, Key.f9, Key.f10}
+        # F2 = Input 1 (@nariwal.shop / .TXT) | F3 = Input 2 (2nd Email) | F4 = Input 3 (3rd Email/Text)
+        # F5 = Smart Visual/OCR Target Click  | F6 = Pause/Resume Rec    | F7 = Fetch OTP
+        # F8 = Record/Stop                    | F9 = Play Loops          | F10 = Emergency Stop
+        self.control_keys = {Key.f2, Key.f3, Key.f4, Key.f5, Key.f6, Key.f7, Key.f8, Key.f9, Key.f10}
+        self.settings_file = os.path.join(self.base_dir, "bot_settings.json")
 
         self._build_ui()
+        self._load_saved_ui_settings()
         self._start_global_hotkey_listener()
 
         self.root.bind("<Map>", self._on_window_restore)
@@ -219,6 +222,65 @@ class ActionRecorderBot:
 
         # Start Background RDP Disconnect Watchdog (Auto-switches to Virtual Display Console if RDP is closed)
         self._start_rdp_disconnect_watchdog()
+
+    # -------------------- PERSISTENT DEFAULT SETTINGS (bot_settings.json) --------------------
+    def _settings_vars(self) -> dict:
+        return {
+            "input1_domain": self.domain_var,
+            "input2_email": self.secondary_email_var,
+            "input3_value": self.third_input_var,
+            "otp_timeout": self.otp_timeout_var,
+            "loops": self.loop_var,
+            "speed": self.speed_label_var,
+            "smart_target_text": self.smart_target_text_var,
+            "auto_otp_after_email": self.auto_otp_after_email_var,
+            "press_enter_after_otp": self.press_enter_after_otp_var,
+            "smart_target_on": self.smart_target_var,
+            "auto_minimize": self.auto_min_var,
+            "auto_fix_mouse_bump": self.self_heal_var,
+        }
+
+    def _load_saved_ui_settings(self):
+        """Load last-used inputs & toggles, then auto-save on every change."""
+        vars_map = self._settings_vars()
+        if os.path.exists(self.settings_file):
+            try:
+                with open(self.settings_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                for key, var in vars_map.items():
+                    if key in data:
+                        try:
+                            var.set(data[key])
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        self._settings_save_job = None
+        for var in vars_map.values():
+            var.trace_add("write", lambda *_: self._schedule_settings_save())
+        self.root.protocol("WM_DELETE_WINDOW", self._on_app_close)
+
+    def _schedule_settings_save(self):
+        if getattr(self, "_settings_save_job", None):
+            try:
+                self.root.after_cancel(self._settings_save_job)
+            except Exception:
+                pass
+        self._settings_save_job = self.root.after(600, self._save_ui_settings)
+
+    def _save_ui_settings(self):
+        self._settings_save_job = None
+        try:
+            data = {k: v.get() for k, v in self._settings_vars().items()}
+            with open(self.settings_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
+
+    def _on_app_close(self):
+        self._save_ui_settings()
+        self.root.destroy()
 
     def _auto_connect_gmail_startup(self):
         if os.path.exists(self.gmail_fetcher.creds_path):
@@ -483,12 +545,12 @@ class ActionRecorderBot:
             text_color="#60A5FA",
         ).pack(anchor="w", padx=16, pady=(12, 8))
 
-        # Inputs Row
+        # Inputs Row 1: Input 1 [F2] + Input 2 [F3]
         inputs_row = ctk.CTkFrame(otp_card, fg_color="transparent")
-        inputs_row.pack(fill="x", padx=16, pady=(0, 8))
+        inputs_row.pack(fill="x", padx=16, pady=(0, 6))
 
         ctk.CTkLabel(
-            inputs_row, text="Domain [F2]", font=self.font_small, text_color=TEXT_SECONDARY
+            inputs_row, text="Input 1 [F2]", font=self.font_small, text_color="#38BDF8"
         ).pack(side="left", padx=(0, 6))
 
         self.domain_var = tk.StringVar(value="@nariwal.shop")
@@ -499,15 +561,15 @@ class ActionRecorderBot:
             fg_color=CARD_INNER,
             border_color=CARD_BORDER,
             text_color="#38BDF8",
-            width=115,
+            width=130,
             height=32,
             corner_radius=8,
         )
-        self.domain_entry.pack(side="left", padx=(0, 10))
+        self.domain_entry.pack(side="left", padx=(0, 12))
 
         ctk.CTkLabel(
-            inputs_row, text="2nd [F4]", font=self.font_small, text_color=TEXT_SECONDARY
-        ).pack(side="left", padx=(0, 5))
+            inputs_row, text="Input 2 [F3]", font=self.font_small, text_color="#F472B6"
+        ).pack(side="left", padx=(0, 6))
 
         self.secondary_email_var = tk.StringVar(value="mobile.j3pro@gmail.com")
         self.sec_entry = ctk.CTkEntry(
@@ -517,14 +579,35 @@ class ActionRecorderBot:
             fg_color=CARD_INNER,
             border_color=CARD_BORDER,
             text_color="#F472B6",
-            width=165,
             height=32,
             corner_radius=8,
         )
-        self.sec_entry.pack(side="left", padx=(0, 8))
+        self.sec_entry.pack(side="left", fill="x", expand=True)
+
+        # Inputs Row 2: Input 3 [F4] + .TXT loader + Email Queue
+        inputs_row2 = ctk.CTkFrame(otp_card, fg_color="transparent")
+        inputs_row2.pack(fill="x", padx=16, pady=(0, 8))
+
+        ctk.CTkLabel(
+            inputs_row2, text="Input 3 [F4]", font=self.font_small, text_color="#A3E635"
+        ).pack(side="left", padx=(0, 6))
+
+        self.third_input_var = tk.StringVar(value="")
+        self.third_entry = ctk.CTkEntry(
+            inputs_row2,
+            textvariable=self.third_input_var,
+            placeholder_text="Koi bhi email / text (e.g. name, password)",
+            font=self.font_body,
+            fg_color=CARD_INNER,
+            border_color=CARD_BORDER,
+            text_color="#A3E635",
+            height=32,
+            corner_radius=8,
+        )
+        self.third_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
         self.load_txt_btn = ctk.CTkButton(
-            inputs_row,
+            inputs_row2,
             text="📄 Load .TXT",
             font=self.font_small,
             fg_color="#1E202B",
@@ -540,7 +623,7 @@ class ActionRecorderBot:
         self.load_txt_btn.pack(side="left", padx=(0, 6))
 
         self.email_queue_btn = ctk.CTkButton(
-            inputs_row,
+            inputs_row2,
             text="Email Queue",
             font=self.font_small,
             fg_color="#1E202B",
@@ -579,7 +662,7 @@ class ActionRecorderBot:
         self.auto_otp_after_email_var = tk.BooleanVar(value=True)
         ctk.CTkSwitch(
             switches_row,
-            text="Auto-OTP after F2/F4",
+            text="Auto-OTP after F2/F3/F4",
             variable=self.auto_otp_after_email_var,
             font=self.font_small,
             text_color=TEXT_PRIMARY,
@@ -726,13 +809,13 @@ class ActionRecorderBot:
             justify="center",
         ).pack(side="left")
 
-        # Smart Target Text / Reference Image Row [F3]
+        # Smart Target Text / Reference Image Row [F5]
         target_row = ctk.CTkFrame(play_card, fg_color="transparent")
         target_row.pack(fill="x", padx=16, pady=(0, 8))
 
         ctk.CTkLabel(
             target_row,
-            text="Target [F3]:",
+            text="Target [F5]:",
             font=self.font_small,
             text_color=TEXT_SECONDARY,
         ).pack(side="left", padx=(0, 6))
@@ -823,13 +906,14 @@ class ActionRecorderBot:
         kbd_inner.pack(fill="x", padx=10, pady=8)
 
         shortcuts = [
-            ("F2", "@nariwal.shop", "#38BDF8"),
-            ("F3", "Smart Target Click", "#FBBF24"),
-            ("F4", "mobile.j3pro", "#F472B6"),
-            ("F6", "Pause / Resume", "#FB923C"),
+            ("F2", "Input 1", "#38BDF8"),
+            ("F3", "Input 2", "#F472B6"),
+            ("F4", "Input 3", "#A3E635"),
+            ("F5", "Smart Click", "#FBBF24"),
+            ("F6", "Pause", "#FB923C"),
             ("F7", "Fetch OTP", "#A78BFA"),
-            ("F8", "Start / Stop Rec", "#F87171"),
-            ("F9", "Play Loops", "#34D399"),
+            ("F8", "Rec / Stop", "#F87171"),
+            ("F9", "Play", "#34D399"),
             ("F10", "Stop", "#FB7185"),
         ]
 
@@ -902,8 +986,9 @@ class ActionRecorderBot:
 
         self.log(
             "✦ AutoFlow Studio Ready — Browser-Safe OS-Suppressed Shortcuts Active:\n"
-            "  • [F2] Type random @nariwal.shop email  |  [F4] Type mobile.j3pro@gmail.com  |  [F6] Pause/Resume Recording\n"
-            "  • Auto-OTP Watcher automatically fetches & types the 6-digit OTP from hussainnariwal@gmail.com in <0.8s!"
+            "  • [F2] Input 1 (random @domain / .TXT email)  |  [F3] Input 2  |  [F4] Input 3  |  [F5] Smart Click\n"
+            "  • Hotkey dabate hi us Input box ki value cursor wale field me type ho jayegi (settings auto-save hoti hain).\n"
+            "  • Auto-OTP Watcher automatically fetches & types the 6-digit OTP from hussainnariwal@gmail.com!"
         )
 
     def log(self, message: str):
@@ -1326,9 +1411,10 @@ class ActionRecorderBot:
     # -------------------- GLOBAL HOTKEY LISTENER (OS-LEVEL BROWSER SUPPRESSION) --------------------
     def _start_global_hotkey_listener(self):
         bot_vk_actions = {
-            0x71: self.hotkey_insert_dynamic_email,                            # F2
-            0x72: self.hotkey_smart_target_click,                              # F3 -> Smart Visual/OCR Target Click
-            0x73: self.hotkey_insert_secondary_email,                          # F4
+            0x71: self.hotkey_insert_dynamic_email,                            # F2 -> Input 1 (Domain / .TXT queue)
+            0x72: self.hotkey_insert_secondary_email,                          # F3 -> Input 2 (2nd Email)
+            0x73: self.hotkey_insert_third_input,                              # F4 -> Input 3 (Any email/text)
+            0x74: self.hotkey_smart_target_click,                              # F5 -> Smart Visual/OCR Target Click
             0x75: lambda: self.toggle_pause_recording(from_gui_button=False),  # F6
             0x76: self.hotkey_fetch_and_type_otp,                              # F7
             0x77: lambda: self.toggle_recording(from_gui_button=False),        # F8
@@ -1358,7 +1444,7 @@ class ActionRecorderBot:
             self.stop_playback_flag = True
         self.log("■ Emergency Stop (F10) triggered!")
 
-    # -------------------- SMART VISUAL & OCR TARGET CLICK [F3] --------------------
+    # -------------------- SMART VISUAL & OCR TARGET CLICK [F5] --------------------
     def select_visual_reference_image(self):
         """Allow user to pick a cropped reference image (PNG/JPG) to match on screen."""
         path = filedialog.askopenfilename(
@@ -1378,11 +1464,11 @@ class ActionRecorderBot:
 
     def hotkey_smart_target_click(self):
         """
-        Triggered when user presses [F3].
-        - If 'Target [F3]' box has text (e.g. '@nariwal.shop' or 'Add new contact info') or a Ref Image,
+        Triggered when user presses [F5].
+        - If 'Target [F5]' box has text (e.g. '@nariwal.shop' or 'Add new contact info') or a Ref Image,
           it immediately searches the screen for that element, moves the mouse there, clicks it,
           and records a 'smart_target_click' step!
-        - If 'Target [F3]' box is empty, it inspects what is under the cursor right now (OCR + Visual Patch),
+        - If 'Target [F5]' box is empty, it inspects what is under the cursor right now (OCR + Visual Patch),
           locks onto that text/image as the target, clicks it, and records a 'smart_target_click' step!
         """
         if self.is_playing or self.is_busy_injecting:
@@ -1416,10 +1502,10 @@ class ActionRecorderBot:
                     )
                     if found:
                         click_x, click_y, reason = found
-                        self.log(f"🎯 [F3] Found target [{reason}] at ({click_x}, {click_y}) & clicking!")
+                        self.log(f"🎯 [F5] Found target [{reason}] at ({click_x}, {click_y}) & clicking!")
                     else:
                         self.log(
-                            f"🎯 [F3] Recorded target rule ['{custom_txt or 'Visual Image'}'] & clicking at current cursor ({click_x}, {click_y})"
+                            f"🎯 [F5] Recorded target rule ['{custom_txt or 'Visual Image'}'] & clicking at current cursor ({click_x}, {click_y})"
                         )
                 else:
                     # Auto-detect text & visual template right under the cursor!
@@ -1439,7 +1525,7 @@ class ActionRecorderBot:
                     template_b64 = info.get("template_b64", "")
                     raw_txt = info.get("raw_text", "")
                     self.log(
-                        f"🎯 [F3] Locked Smart Target under cursor: Text=['{anchor_text or raw_txt or 'Visual Patch'}'] at ({click_x}, {click_y})"
+                        f"🎯 [F5] Locked Smart Target under cursor: Text=['{anchor_text or raw_txt or 'Visual Patch'}'] at ({click_x}, {click_y})"
                     )
 
                 if self.is_recording:
@@ -1595,9 +1681,9 @@ class ActionRecorderBot:
                     "email": sec_email,
                     "time": t,
                 })
-                self.log(f"✦ [{t:.2f}s] Recorded [F4 Secondary Email] & typing: {sec_email}")
+                self.log(f"✦ [{t:.2f}s] Recorded [F3 Input 2] & typing: {sec_email}")
             else:
-                self.log(f"✦ [F4] Typing secondary forwarded email: {sec_email}")
+                self.log(f"✦ [F3] Typing Input 2: {sec_email}")
 
             pause_start = time.perf_counter()
             self._type_string_reliably(sec_email)
@@ -1605,6 +1691,52 @@ class ActionRecorderBot:
                 self.start_time += (time.perf_counter() - pause_start)
 
             self._start_auto_otp_watcher_after_email(sec_email, self.email_typed_epoch_ms)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def hotkey_insert_third_input(self):
+        """[F4] Type whatever is in Input 3. If it's an email, Auto-OTP watcher also starts for it."""
+        if self.is_playing or self.is_busy_injecting:
+            return
+
+        value = self.third_input_var.get().strip()
+        if not value:
+            self.log("⚠ [F4] Input 3 khali hai — pehle Input 3 box me koi email/text likhein.")
+            return
+
+        def _worker():
+            is_email = "@" in value and "." in value.split("@")[-1]
+            if is_email:
+                self.auto_otp_session_id += 1
+                self.gmail_fetcher.snapshot_existing_messages()
+                self.current_test_email = value
+                self.email_typed_epoch_ms = int(time.time() * 1000)
+                self.root.after(0, lambda: self.current_email_lbl.configure(text=f"Email: {value}"))
+
+            if self.is_recording:
+                t = self._elapsed()
+                cx, cy = self.mouse_ctrl.position
+                rx, ry = self._to_relative_coords(cx, cy)
+                self.events.append({
+                    "type": "insert_third_input",
+                    "x": int(cx),
+                    "y": int(cy),
+                    "rx": rx,
+                    "ry": ry,
+                    "value": value,
+                    "time": t,
+                })
+                self.log(f"✦ [{t:.2f}s] Recorded [F4 Input 3] & typing: {value}")
+            else:
+                self.log(f"✦ [F4] Typing Input 3: {value}")
+
+            pause_start = time.perf_counter()
+            self._type_string_reliably(value)
+            if self.is_recording:
+                self.start_time += (time.perf_counter() - pause_start)
+
+            if is_email:
+                self._start_auto_otp_watcher_after_email(value, self.email_typed_epoch_ms)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -2044,7 +2176,7 @@ class ActionRecorderBot:
         )
         self._set_status(f"● RECORDING ({sw}×{sh})", "#F87171", "#450A0A")
         self.log(
-            "● Recording started! Use [F6] to Pause/Resume, [F2] (@nariwal.shop) or [F4] (mobile.j3pro@gmail.com) for Email, and [F8] to Stop."
+            "● Recording started! Use [F6] to Pause/Resume, [F2]/[F3]/[F4] for Input 1/2/3, and [F8] to Stop."
         )
 
         self.mouse_listener = mouse.Listener(
@@ -2326,7 +2458,10 @@ class ActionRecorderBot:
         clean_dom = self.domain_var.get().strip().lstrip("@").lower() or "nariwal.shop"
         clean_sec = self.secondary_email_var.get().strip().lower() or "mobile.j3pro@gmail.com"
         custom_t = self.smart_target_text_var.get().strip().lower()
+        third_v = self.third_input_var.get().strip().lower()
         if clean_dom in low or clean_sec in low or "j3pro" in low:
+            return True
+        if third_v and len(third_v) >= 4 and third_v in low:
             return True
         if "add new contact" in low or "new contact info" in low:
             return True
@@ -2607,6 +2742,22 @@ class ActionRecorderBot:
                         )
                         self.log(f"✦ [Loop #{loop_num}] Typing 2nd forwarded email: {sec_email}")
                         self._type_string_reliably(sec_email, char_delay=0.03)
+                        loop_start_clock += (time.perf_counter() - pause_t)
+
+                    elif etype == "insert_third_input":
+                        pause_t = time.perf_counter()
+                        val3 = self.third_input_var.get().strip() or event.get("value", "")
+                        if val3:
+                            if "@" in val3 and "." in val3.split("@")[-1]:
+                                if self.gmail_fetcher.is_connected():
+                                    self.gmail_fetcher.snapshot_existing_messages()
+                                self.current_test_email = val3
+                                self.email_typed_epoch_ms = int(time.time() * 1000)
+                                self.root.after(
+                                    0, lambda em=val3: self.current_email_lbl.configure(text=f"Email: {em}")
+                                )
+                            self.log(f"✦ [Loop #{loop_num}] Typing Input 3: {val3}")
+                            self._type_string_reliably(val3, char_delay=0.03)
                         loop_start_clock += (time.perf_counter() - pause_t)
 
                     elif etype == "fetch_and_type_otp":

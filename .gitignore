@@ -3,3 +3,4 @@ __pycache__/
 credentials.json
 token.json
 debug_*.png
+bot_settings.json
