@@ -179,6 +179,8 @@ class ActionRecorderBot:
         self.current_test_email: Optional[str] = None
         self.email_typed_epoch_ms: int = 0
         self.custom_email_queue = []
+        self.used_emails_csv_path = os.path.join(self.base_dir, "used_emails.csv")
+        self.default_emails_txt_path = os.path.join(self.base_dir, "emails.txt")
         self._typed_buffer = ""
         self.auto_otp_session_id = 0
         self.clicks_since_email = 0
@@ -208,6 +210,9 @@ class ActionRecorderBot:
         self.default_file = os.path.join(self.base_dir, "recorded_actions.json")
         if os.path.exists(self.default_file):
             self._load_from_path(self.default_file, silent=True)
+
+        if os.path.exists(self.default_emails_txt_path):
+            self._load_emails_from_file_path(self.default_emails_txt_path, silent=True)
 
         # Silent Gmail OAuth connection on startup if token.json exists
         threading.Thread(target=self._auto_connect_gmail_startup, daemon=True).start()
@@ -494,15 +499,15 @@ class ActionRecorderBot:
             fg_color=CARD_INNER,
             border_color=CARD_BORDER,
             text_color="#38BDF8",
-            width=125,
+            width=115,
             height=32,
             corner_radius=8,
         )
-        self.domain_entry.pack(side="left", padx=(0, 12))
+        self.domain_entry.pack(side="left", padx=(0, 10))
 
         ctk.CTkLabel(
-            inputs_row, text="2nd Email [F4]", font=self.font_small, text_color=TEXT_SECONDARY
-        ).pack(side="left", padx=(0, 6))
+            inputs_row, text="2nd [F4]", font=self.font_small, text_color=TEXT_SECONDARY
+        ).pack(side="left", padx=(0, 5))
 
         self.secondary_email_var = tk.StringVar(value="mobile.j3pro@gmail.com")
         self.sec_entry = ctk.CTkEntry(
@@ -512,13 +517,29 @@ class ActionRecorderBot:
             fg_color=CARD_INNER,
             border_color=CARD_BORDER,
             text_color="#F472B6",
-            width=185,
+            width=165,
             height=32,
             corner_radius=8,
         )
-        self.sec_entry.pack(side="left", padx=(0, 10))
+        self.sec_entry.pack(side="left", padx=(0, 8))
 
-        ctk.CTkButton(
+        self.load_txt_btn = ctk.CTkButton(
+            inputs_row,
+            text="📄 Load .TXT",
+            font=self.font_small,
+            fg_color="#1E202B",
+            hover_color="#2A2D3D",
+            border_width=1,
+            border_color="#2E3244",
+            text_color="#38BDF8",
+            width=84,
+            height=32,
+            corner_radius=8,
+            command=self.load_emails_txt_clicked,
+        )
+        self.load_txt_btn.pack(side="left", padx=(0, 6))
+
+        self.email_queue_btn = ctk.CTkButton(
             inputs_row,
             text="Email Queue",
             font=self.font_small,
@@ -527,11 +548,12 @@ class ActionRecorderBot:
             border_width=1,
             border_color="#2E3244",
             text_color=TEXT_PRIMARY,
-            width=92,
+            width=86,
             height=32,
             corner_radius=8,
             command=self.open_email_list_dialog,
-        ).pack(side="left")
+        )
+        self.email_queue_btn.pack(side="left")
 
         # Switches Row
         switches_row = ctk.CTkFrame(otp_card, fg_color="transparent")
@@ -961,20 +983,138 @@ class ActionRecorderBot:
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    # -------------------- USED EMAILS CSV RECORD & .TXT FILE LOADER --------------------
+    def _load_used_emails_set(self) -> set:
+        """
+        Load all previously used emails from `used_emails.csv` (1 email per line)
+        and `signup_test_results.csv` so the bot NEVER reuses or regenerates a duplicate email.
+        """
+        used = set()
+        # 1. Read used_emails.csv (1 email per line)
+        if os.path.exists(self.used_emails_csv_path):
+            try:
+                with open(self.used_emails_csv_path, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        clean = line.strip().split(",")[0].strip().lower()
+                        if clean and "@" in clean:
+                            used.add(clean)
+            except Exception:
+                pass
+
+        # 2. Also include any emails logged in signup_test_results.csv
+        results_csv = os.path.join(self.base_dir, "signup_test_results.csv")
+        if os.path.exists(results_csv):
+            try:
+                with open(results_csv, "r", encoding="utf-8", errors="ignore") as f:
+                    for row in csv.reader(f):
+                        if len(row) >= 2 and "@" in row[1]:
+                            used.add(row[1].strip().lower())
+            except Exception:
+                pass
+        return used
+
+    def _record_used_email(self, email: str):
+        """
+        Save `email` into `used_emails.csv` strictly as ONE email per line (`email\\n`),
+        ensuring no duplicate lines are written.
+        """
+        clean_em = email.strip()
+        if not clean_em or "@" not in clean_em:
+            return
+        used = self._load_used_emails_set()
+        if clean_em.lower() in used and os.path.exists(self.used_emails_csv_path):
+            # Check if it's already explicitly in used_emails.csv
+            try:
+                with open(self.used_emails_csv_path, "r", encoding="utf-8", errors="ignore") as f:
+                    existing_lines = {ln.strip().lower() for ln in f if ln.strip()}
+                if clean_em.lower() in existing_lines:
+                    return
+            except Exception:
+                pass
+
+        try:
+            with open(self.used_emails_csv_path, "a", encoding="utf-8", newline="\n") as f:
+                f.write(f"{clean_em}\n")
+        except Exception:
+            pass
+
+    def _update_email_queue_badge(self):
+        count = len(self.custom_email_queue)
+        if hasattr(self, "email_queue_btn"):
+            label = f"Queue ({count})" if count > 0 else "Email Queue"
+            fg = "#065F46" if count > 0 else "#1E202B"
+            self.root.after(0, lambda: self.email_queue_btn.configure(text=label, fg_color=fg))
+
+    def _load_emails_from_file_path(self, path: str, silent: bool = False) -> int:
+        """
+        Load emails from a `.txt` or `.csv` file (1 email per line),
+        automatically skipping any email that is already in `used_emails.csv`.
+        """
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                raw_lines = f.read().splitlines()
+
+            used_set = self._load_used_emails_set()
+            fresh_list = []
+            skipped_used = 0
+            seen_in_file = set()
+
+            for line in raw_lines:
+                # Support 1 email per line (or first column if CSV)
+                candidate = line.strip().split(",")[0].strip()
+                if not candidate or "@" not in candidate:
+                    continue
+                low_c = candidate.lower()
+                if low_c in seen_in_file:
+                    continue
+                seen_in_file.add(low_c)
+                if low_c in used_set:
+                    skipped_used += 1
+                    continue
+                fresh_list.append(candidate)
+
+            self.custom_email_queue = fresh_list
+            self._update_email_queue_badge()
+
+            if not silent or fresh_list:
+                msg = f"📄 Loaded {len(fresh_list)} unused email(s) from {os.path.basename(path)}"
+                if skipped_used > 0:
+                    msg += f" (Skipped {skipped_used} already in used_emails.csv)"
+                self.log(msg)
+            return len(fresh_list)
+        except Exception as e:
+            if not silent:
+                self.log(f"⚠ Failed to load emails from file: {e}")
+            return 0
+
+    def load_emails_txt_clicked(self):
+        """Open file dialog to select a .TXT or .CSV file with 1 email per line."""
+        path = filedialog.askopenfilename(
+            title="Select Emails File (.txt or .csv — 1 email per line)",
+            filetypes=[("Text / CSV Email Files", "*.txt;*.csv"), ("All Files", "*.*")],
+        )
+        if path:
+            self._load_emails_from_file_path(path, silent=False)
+
     def open_email_list_dialog(self):
         dlg = ctk.CTkToplevel(self.root)
-        dlg.title("Custom Email Queue")
-        dlg.geometry("480x400")
+        dlg.title("Custom Email Queue & .TXT Loader")
+        dlg.geometry("520x440")
         dlg.configure(fg_color=BG_MAIN)
         dlg.attributes("-topmost", True)
 
+        used_count = len(self._load_used_emails_set())
         ctk.CTkLabel(
             dlg,
-            text="Paste specific emails (one per line) to test one-by-one.\nLeave empty to auto-generate random @nariwal.shop emails.",
+            text=(
+                f"Paste emails (1 email per line) or load a .TXT/.CSV file.\n"
+                f"• Used Emails Recorded in used_emails.csv: {used_count} (auto-skipped so never repeated!)\n"
+                f"• Leave empty to auto-generate unique random @domain emails."
+            ),
             font=self.font_regular,
             text_color=TEXT_SECONDARY,
             justify="left",
-        ).pack(anchor="w", padx=18, pady=(16, 10))
+        ).pack(anchor="w", padx=18, pady=(14, 10))
 
         txt = ctk.CTkTextbox(
             dlg,
@@ -989,34 +1129,97 @@ class ActionRecorderBot:
         if self.custom_email_queue:
             txt.insert("end", "\n".join(self.custom_email_queue))
 
+        btn_row = ctk.CTkFrame(dlg, fg_color="transparent")
+        btn_row.pack(fill="x", padx=18, pady=(0, 16))
+
+        def _import_txt_into_box():
+            path = filedialog.askopenfilename(
+                parent=dlg,
+                title="Select .TXT or .CSV Email List (1 email per line)",
+                filetypes=[("Text / CSV Files", "*.txt;*.csv"), ("All Files", "*.*")],
+            )
+            if path:
+                cnt = self._load_emails_from_file_path(path, silent=False)
+                txt.delete("1.0", "end")
+                if self.custom_email_queue:
+                    txt.insert("end", "\n".join(self.custom_email_queue))
+
         def _save_list():
             raw = txt.get("1.0", "end").strip()
-            lines = [line.strip() for line in raw.splitlines() if line.strip() and "@" in line]
+            used_set = self._load_used_emails_set()
+            lines = []
+            skipped = 0
+            for line in raw.splitlines():
+                cand = line.strip().split(",")[0].strip()
+                if cand and "@" in cand:
+                    if cand.lower() in used_set:
+                        skipped += 1
+                    else:
+                        lines.append(cand)
             self.custom_email_queue = lines
+            self._update_email_queue_badge()
             if lines:
-                self.log(f"✓ Loaded {len(lines)} custom email(s) into queue.")
+                self.log(f"✓ Queued {len(lines)} unused custom email(s) (Skipped {skipped} already used).")
             else:
-                self.log("ℹ Custom email list cleared. Using random domain email generator.")
+                self.log("ℹ Custom email queue empty — using unique random domain email generator.")
             dlg.destroy()
 
         ctk.CTkButton(
-            dlg,
-            text="Save Email Queue",
+            btn_row,
+            text="📂 Load from .TXT / .CSV",
+            font=self.font_btn,
+            fg_color="#0284C7",
+            hover_color="#0369A1",
+            corner_radius=9,
+            height=36,
+            command=_import_txt_into_box,
+        ).pack(side="left", expand=True, fill="x", padx=(0, 6))
+
+        ctk.CTkButton(
+            btn_row,
+            text="✓ Save Email Queue",
             font=self.font_btn,
             fg_color=ACCENT_GREEN,
             hover_color="#059669",
             corner_radius=9,
             height=36,
             command=_save_list,
-        ).pack(pady=(0, 16))
+        ).pack(side="left", expand=True, fill="x", padx=(6, 0))
 
     def _get_next_test_email(self) -> str:
-        """Return next email from custom queue or generate a fresh random email on user's domain."""
-        if self.custom_email_queue:
-            email = self.custom_email_queue.pop(0)
-        else:
+        """
+        Return next unused email from custom `.txt` queue OR generate a fresh random `@domain` email.
+        Always checks `used_emails.csv` first so no email is EVER repeated, and immediately records
+        the selected email into `used_emails.csv` (1 email per line).
+        """
+        used_set = self._load_used_emails_set()
+        email = None
+
+        # 1. Try custom email queue (.txt / Email Queue) first, skipping any already in used_emails.csv
+        while self.custom_email_queue:
+            candidate = self.custom_email_queue.pop(0).strip()
+            if candidate and "@" in candidate and candidate.lower() not in used_set:
+                email = candidate
+                break
+            else:
+                self.log(f"⏭ Skipped already-used email from list: {candidate}")
+
+        self._update_email_queue_badge()
+
+        # 2. Otherwise generate a fresh random domain email guaranteed not in used_emails.csv
+        if not email:
             domain = self.domain_var.get().strip() or "nariwal.shop"
-            email = generate_random_domain_email(domain=domain)
+            for _ in range(500):
+                candidate = generate_random_domain_email(domain=domain)
+                if candidate.lower() not in used_set:
+                    email = candidate
+                    break
+            if not email:
+                email = generate_random_domain_email(domain=domain)
+
+        # Immediately record in used_emails.csv (1 email per line)
+        self._record_used_email(email)
+
         self.current_test_email = email
         self.email_typed_epoch_ms = int(time.time() * 1000)
         self.root.after(
@@ -1038,6 +1241,8 @@ class ActionRecorderBot:
             self.is_busy_injecting = False
 
     def _log_signup_result_csv(self, email: str, otp: Optional[str], status: str):
+        if email and "@" in email:
+            self._record_used_email(email)
         csv_path = os.path.join(self.base_dir, "signup_test_results.csv")
         file_exists = os.path.exists(csv_path)
         try:
