@@ -199,9 +199,9 @@ class ActionRecorderBot:
 
         # Browser-Safe OS-Suppressed Hotkeys
         # F2 = Input 1 (@nariwal.shop / .TXT) | F3 = Input 2 (2nd Email) | F4 = Input 3 (3rd Email/Text)
-        # F5 = Smart Visual/OCR Target Click  | F6 = Pause/Resume Rec    | F7 = Fetch OTP
+        # F1 = Smart Visual/OCR Target Click  | F6 = Pause/Resume Rec    | F7 = Fetch OTP
         # F8 = Record/Stop                    | F9 = Play Loops          | F10 = Emergency Stop
-        self.control_keys = {Key.f2, Key.f3, Key.f4, Key.f5, Key.f6, Key.f7, Key.f8, Key.f9, Key.f10}
+        self.control_keys = {Key.f2, Key.f3, Key.f1, Key.f4, Key.f6, Key.f7, Key.f8, Key.f9, Key.f10}
         self.settings_file = os.path.join(self.base_dir, "bot_settings.json")
 
         self._build_ui()
@@ -809,13 +809,13 @@ class ActionRecorderBot:
             justify="center",
         ).pack(side="left")
 
-        # Smart Target Text / Reference Image Row [F5]
+        # Smart Target Text / Reference Image Row [F1]
         target_row = ctk.CTkFrame(play_card, fg_color="transparent")
         target_row.pack(fill="x", padx=16, pady=(0, 8))
 
         ctk.CTkLabel(
             target_row,
-            text="Target [F5]:",
+            text="Target [F1]:",
             font=self.font_small,
             text_color=TEXT_SECONDARY,
         ).pack(side="left", padx=(0, 6))
@@ -909,7 +909,7 @@ class ActionRecorderBot:
             ("F2", "Input 1", "#38BDF8"),
             ("F3", "Input 2", "#F472B6"),
             ("F4", "Input 3", "#A3E635"),
-            ("F5", "Smart Click", "#FBBF24"),
+            ("F1", "Smart Click", "#FBBF24"),
             ("F6", "Pause", "#FB923C"),
             ("F7", "Fetch OTP", "#A78BFA"),
             ("F8", "Rec / Stop", "#F87171"),
@@ -986,7 +986,7 @@ class ActionRecorderBot:
 
         self.log(
             "✦ AutoFlow Studio Ready — Browser-Safe OS-Suppressed Shortcuts Active:\n"
-            "  • [F2] Input 1 (random @domain / .TXT email)  |  [F3] Input 2  |  [F4] Input 3  |  [F5] Smart Click\n"
+            "  • [F2] Input 1 (random @domain / .TXT email)  |  [F3] Input 2  |  [F4] Input 3  |  [F1] Smart Click\n"
             "  • Hotkey dabate hi us Input box ki value cursor wale field me type ho jayegi (settings auto-save hoti hain).\n"
             "  • Auto-OTP Watcher automatically fetches & types the 6-digit OTP from hussainnariwal@gmail.com!"
         )
@@ -1414,7 +1414,7 @@ class ActionRecorderBot:
             0x71: self.hotkey_insert_dynamic_email,                            # F2 -> Input 1 (Domain / .TXT queue)
             0x72: self.hotkey_insert_secondary_email,                          # F3 -> Input 2 (2nd Email)
             0x73: self.hotkey_insert_third_input,                              # F4 -> Input 3 (Any email/text)
-            0x74: self.hotkey_smart_target_click,                              # F5 -> Smart Visual/OCR Target Click
+            0x70: self.hotkey_smart_target_click,                              # F1 -> Smart Visual/OCR Target Click (F5 left free for browser refresh)
             0x75: lambda: self.toggle_pause_recording(from_gui_button=False),  # F6
             0x76: self.hotkey_fetch_and_type_otp,                              # F7
             0x77: lambda: self.toggle_recording(from_gui_button=False),        # F8
@@ -1444,7 +1444,7 @@ class ActionRecorderBot:
             self.stop_playback_flag = True
         self.log("■ Emergency Stop (F10) triggered!")
 
-    # -------------------- SMART VISUAL & OCR TARGET CLICK [F5] --------------------
+    # -------------------- SMART VISUAL & OCR TARGET CLICK [F1] --------------------
     def select_visual_reference_image(self):
         """Allow user to pick a cropped reference image (PNG/JPG) to match on screen."""
         path = filedialog.askopenfilename(
@@ -1464,11 +1464,11 @@ class ActionRecorderBot:
 
     def hotkey_smart_target_click(self):
         """
-        Triggered when user presses [F5].
-        - If 'Target [F5]' box has text (e.g. '@nariwal.shop' or 'Add new contact info') or a Ref Image,
+        Triggered when user presses [F1].
+        - If 'Target [F1]' box has text (e.g. '@nariwal.shop' or 'Add new contact info') or a Ref Image,
           it immediately searches the screen for that element, moves the mouse there, clicks it,
           and records a 'smart_target_click' step!
-        - If 'Target [F5]' box is empty, it inspects what is under the cursor right now (OCR + Visual Patch),
+        - If 'Target [F1]' box is empty, it inspects what is under the cursor right now (OCR + Visual Patch),
           locks onto that text/image as the target, clicks it, and records a 'smart_target_click' step!
         """
         if self.is_playing or self.is_busy_injecting:
@@ -1502,10 +1502,10 @@ class ActionRecorderBot:
                     )
                     if found:
                         click_x, click_y, reason = found
-                        self.log(f"🎯 [F5] Found target [{reason}] at ({click_x}, {click_y}) & clicking!")
+                        self.log(f"🎯 [F1] Found target [{reason}] at ({click_x}, {click_y}) & clicking!")
                     else:
                         self.log(
-                            f"🎯 [F5] Recorded target rule ['{custom_txt or 'Visual Image'}'] & clicking at current cursor ({click_x}, {click_y})"
+                            f"🎯 [F1] Recorded target rule ['{custom_txt or 'Visual Image'}'] & clicking at current cursor ({click_x}, {click_y})"
                         )
                 else:
                     # Auto-detect text & visual template right under the cursor!
@@ -1525,7 +1525,7 @@ class ActionRecorderBot:
                     template_b64 = info.get("template_b64", "")
                     raw_txt = info.get("raw_text", "")
                     self.log(
-                        f"🎯 [F5] Locked Smart Target under cursor: Text=['{anchor_text or raw_txt or 'Visual Patch'}'] at ({click_x}, {click_y})"
+                        f"🎯 [F1] Locked Smart Target under cursor: Text=['{anchor_text or raw_txt or 'Visual Patch'}'] at ({click_x}, {click_y})"
                     )
 
                 if self.is_recording:
